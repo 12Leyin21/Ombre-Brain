@@ -53,6 +53,10 @@ def load_config(config_path: str = None) -> dict:
             "fuzzy_threshold": 50,
             "max_results": 5,
         },
+        # Proper nouns (names etc.) that jieba's generic dictionary doesn't
+        # know about and may otherwise split apart mid-sentence.
+        # jieba 通用词典不认识的专有名词（人名等），不加会在句中被拆散。
+        "jieba_custom_words": [],
     }
 
     # --- Load user config from YAML file ---
@@ -140,6 +144,26 @@ def setup_logging(level: str = "INFO") -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.StreamHandler()],  # StreamHandler defaults to stderr
     )
+
+
+def register_jieba_words(words: list) -> None:
+    """
+    Register proper nouns with jieba so they aren't split mid-sentence.
+    向 jieba 注册专有名词，防止句中被拆散（如"灵兮"被拆成"灵"/"兮"）。
+
+    jieba's dictionary is a process-wide global, so calling this once at
+    startup (before any real segmentation happens) covers every module
+    that does `import jieba`.
+    jieba 词典是进程级全局状态，启动时调用一次即可覆盖所有 import jieba 的模块。
+    """
+    if not words:
+        return
+    import jieba
+
+    for word in words:
+        word = str(word).strip()
+        if word:
+            jieba.add_word(word)
 
 
 def generate_bucket_id() -> str:

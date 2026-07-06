@@ -80,3 +80,13 @@ wikilink:
   auto_top_k: 8
   min_keyword_len: 2
   exclude_keywords: []
+
+# --- jieba custom dictionary / jieba 自定义词典 ---
+# jieba's generic dictionary doesn't know your own proper nouns (names,
+# nicknames etc.) and may split them apart mid-sentence — this affects
+# auto-tagging quality and wikilink accuracy. List them here.
+# jieba 通用词典不认识你自己的专有名词（人名、昵称等），可能在句中被拆
+# 散，影响自动打标质量和双链准确性。把它们列在这里。
+jieba_custom_words:
+  # - "灵兮"
+  # - "小克"

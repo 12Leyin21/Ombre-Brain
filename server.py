@@ -48,12 +48,16 @@ from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from vector_store import VectorStore
-from utils import load_config, setup_logging
+from utils import load_config, setup_logging, register_jieba_words
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
 setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
+
+# --- Register custom proper nouns with jieba before any segmentation runs ---
+# --- 在任何分词发生前，把自定义专有名词注册进 jieba ---
+register_jieba_words(config.get("jieba_custom_words", []))
 
 # --- Initialize core components / 初始化核心组件 ---
 vector_store = VectorStore(config)                  # Vector store / 向量索引（可选，未配置则纯关键词）
@@ -220,10 +224,13 @@ async def breath(
     valence: float = -1,
     arousal: float = -1,
     mode: str = "summary",
+    date_from: str = "",
+    date_to: str = "",
 ) -> str:
     """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索(此时忽略mode,恒返回全文)。
     mode: summary(默认,浮现时每桶一行摘要,不脱水,省token) / full(浮现时也返回脱水全文)。
-    domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results: 检索结果最多返回条数,钉选桶不占名额。"""
+    domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results: 检索结果最多返回条数,钉选桶不占名额。
+    date_from/date_to: "YYYY-MM-DD",按桶更新时间过滤检索结果,仅检索模式(带query)生效。"""
     await decay_engine.ensure_started()
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
@@ -309,6 +316,8 @@ async def breath(
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
+            date_from=date_from or None,
+            date_to=date_to or None,
         )
     except Exception as e:
         logger.error(f"Search failed / 检索失败: {e}")

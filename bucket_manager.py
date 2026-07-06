@@ -489,6 +489,8 @@ class BucketManager:
         domain_filter: list[str] = None,
         query_valence: float = None,
         query_arousal: float = None,
+        date_from: str = None,
+        date_to: str = None,
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -496,6 +498,10 @@ class BucketManager:
 
         domain_filter: pre-filter by domain (None = search all)
         query_valence/arousal: emotion coordinates for resonance scoring
+        date_from/date_to: "YYYY-MM-DD", filters by bucket's last_active
+        (falls back to created); either end can be omitted.
+        date_from/date_to: "YYYY-MM-DD"，按桶的 last_active（缺失则用
+        created）过滤，两端都可以只传一个。
         """
         if not query or not query.strip():
             return []
@@ -520,6 +526,37 @@ class BucketManager:
                 candidates = all_buckets
         else:
             candidates = all_buckets
+
+        # --- Date range pre-filter / 日期范围预筛 ---
+        # Invalid date strings are ignored rather than erroring the whole
+        # search, since this is a soft filter on top of keyword/semantic.
+        # 日期格式不对就忽略这层过滤，不因为格式错误让整个检索失败。
+        if date_from or date_to:
+            from datetime import date as _date
+
+            df = dt = None
+            try:
+                df = _date.fromisoformat(date_from) if date_from else None
+                dt = _date.fromisoformat(date_to) if date_to else None
+            except ValueError:
+                logger.warning(f"忽略非法日期范围: date_from={date_from} date_to={date_to}")
+
+            if df or dt:
+                def _in_range(b: dict) -> bool:
+                    ts = b["metadata"].get("last_active") or b["metadata"].get("created")
+                    if not ts:
+                        return False
+                    try:
+                        d = datetime.fromisoformat(ts).date()
+                    except ValueError:
+                        return False
+                    if df and d < df:
+                        return False
+                    if dt and d > dt:
+                        return False
+                    return True
+
+                candidates = [b for b in candidates if _in_range(b)]
 
         # --- Semantic channel: cosine similarity against candidates, when
         # an embedding provider is configured. Falls back to {} (keyword-
