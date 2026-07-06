@@ -54,7 +54,11 @@ class BucketManager:
     天然兼容 Obsidian 直接浏览和编辑。
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, vector_store=None):
+        # --- Optional semantic index (None = keyword-only search) ---
+        # --- 可选的语义索引（None = 纯关键词检索）---
+        self.vector_store = vector_store
+
         # --- Read storage paths from config / 从配置中读取存储路径 ---
         self.base_dir = config["buckets_dir"]
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
@@ -177,6 +181,13 @@ class BucketManager:
             f"Created bucket / 创建记忆桶: {bucket_id} ({bucket_name}) → {primary_domain}/"
             + (" [PINNED]" if pinned else "") + (" [PROTECTED]" if protected else "")
         )
+
+        if self.vector_store:
+            try:
+                await self.vector_store.upsert(bucket_id, linked_content)
+            except Exception as e:
+                logger.warning(f"Vector upsert failed / 向量化失败: {bucket_id}: {e}")
+
         return bucket_id
 
     # ---------------------------------------------------------
@@ -263,6 +274,13 @@ class BucketManager:
             return False
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
+
+        if self.vector_store and "content" in kwargs:
+            try:
+                await self.vector_store.upsert(bucket_id, post.content)
+            except Exception as e:
+                logger.warning(f"Vector re-index failed / 向量重建失败: {bucket_id}: {e}")
+
         return True
 
     # ---------------------------------------------------------
@@ -413,6 +431,13 @@ class BucketManager:
             return False
 
         logger.info(f"Deleted bucket / 删除记忆桶: {bucket_id}")
+
+        if self.vector_store:
+            try:
+                self.vector_store.delete(bucket_id)
+            except Exception as e:
+                logger.warning(f"Vector delete failed / 向量删除失败: {bucket_id}: {e}")
+
         return True
 
     # ---------------------------------------------------------
@@ -496,6 +521,20 @@ class BucketManager:
         else:
             candidates = all_buckets
 
+        # --- Semantic channel: cosine similarity against candidates, when
+        # an embedding provider is configured. Falls back to {} (keyword-
+        # only) if unavailable or the API call fails. ---
+        # --- 语义通道：对候选桶做余弦相似度检索（配置了 embedding 服务时）。
+        # 未配置或调用失败时返回 {}，自动降级为纯关键词。---
+        semantic_scores = {}
+        if self.vector_store and self.vector_store.is_available():
+            try:
+                candidate_ids = {b["id"] for b in candidates}
+                semantic_scores = await self.vector_store.search(query, candidate_ids)
+            except Exception as e:
+                logger.warning(f"Semantic search failed / 语义检索失败: {e}")
+                semantic_scores = {}
+
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---
         scored = []
@@ -503,8 +542,14 @@ class BucketManager:
             meta = bucket.get("metadata", {})
 
             try:
-                # Dim 1: topic relevance (fuzzy text, 0~1)
-                topic_score = self._calc_topic_score(query, bucket)
+                # Dim 1: topic relevance — max of fuzzy text match and
+                # semantic similarity (0~1), so vague descriptions that
+                # don't share keywords can still hit via the semantic side.
+                # 主题相关性——取模糊文本匹配和语义相似度的较大值（0~1），
+                # 这样即使模糊描述没有共同关键词，也能靠语义命中。
+                fuzzy_score = self._calc_topic_score(query, bucket)
+                semantic_score = semantic_scores.get(bucket["id"], 0.0)
+                topic_score = max(fuzzy_score, semantic_score)
 
                 # Dim 2: emotion resonance (coordinate distance, 0~1)
                 emotion_score = self._calc_emotion_score(

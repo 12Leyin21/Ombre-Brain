@@ -10,4 +10,5 @@ config.yaml
 buckets/dynamic/
 buckets/archive/
 buckets/permanent/
+buckets/vectors.db
 scarp_paper

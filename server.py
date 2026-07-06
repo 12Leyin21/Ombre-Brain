@@ -47,6 +47,7 @@ from mcp.server.fastmcp import FastMCP
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
+from vector_store import VectorStore
 from utils import load_config, setup_logging
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -54,8 +55,9 @@ config = load_config()
 setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
-# --- Initialize three core components / 初始化三大核心组件 ---
-bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶管理器
+# --- Initialize core components / 初始化核心组件 ---
+vector_store = VectorStore(config)                  # Vector store / 向量索引（可选，未配置则纯关键词）
+bucket_mgr = BucketManager(config, vector_store=vector_store)  # Bucket manager / 记忆桶管理器
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 
@@ -213,7 +215,7 @@ def _bucket_summary_line(b: dict) -> str:
 @mcp.tool()
 async def breath(
     query: Optional[str] = None,
-    max_results: int = 5,
+    max_results: int = 3,
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
