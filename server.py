@@ -197,15 +197,31 @@ async def _merge_or_create(
 # With args: search by keyword + emotion coordinates
 # 有参数：按关键词+情感坐标检索记忆
 # =============================================================
+def _bucket_summary_line(b: dict) -> str:
+    meta = b["metadata"]
+    domains = ",".join(meta.get("domain", []))
+    val = meta.get("valence", 0.5)
+    aro = meta.get("arousal", 0.3)
+    updated = meta.get("last_active") or meta.get("created", "?")
+    return (
+        f"[{b['id']}] {meta.get('name', b['id'])} "
+        f"主题:{domains} 情感:V{val:.1f}/A{aro:.1f} "
+        f"重要:{meta.get('importance', '?')} 更新:{updated}"
+    )
+
+
 @mcp.tool()
 async def breath(
     query: Optional[str] = None,
-    max_results: int = 3,
+    max_results: int = 5,
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
+    mode: str = "summary",
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。domain逗号分隔,valence/arousal 0~1(-1忽略)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索(此时忽略mode,恒返回全文)。
+    mode: summary(默认,浮现时每桶一行摘要,不脱水,省token) / full(浮现时也返回脱水全文)。
+    domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results: 检索结果最多返回条数,钉选桶不占名额。"""
     await decay_engine.ensure_started()
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
@@ -226,7 +242,10 @@ async def breath(
         pinned_results = []
         for b in pinned_buckets:
             try:
-                summary = await dehydrator.dehydrate(b["content"], b["metadata"])
+                if mode == "full":
+                    summary = await dehydrator.dehydrate(b["content"], b["metadata"])
+                else:
+                    summary = _bucket_summary_line(b)
                 pinned_results.append(f"📌 [核心准则] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
@@ -251,7 +270,10 @@ async def breath(
         dynamic_results = []
         for b in top:
             try:
-                summary = await dehydrator.dehydrate(b["content"], b["metadata"])
+                if mode == "full":
+                    summary = await dehydrator.dehydrate(b["content"], b["metadata"])
+                else:
+                    summary = _bucket_summary_line(b)
                 await bucket_mgr.touch(b["id"])
                 score = decay_engine.calculate_score(b["metadata"])
                 dynamic_results.append(f"[权重:{score:.2f}] {summary}")
@@ -275,9 +297,13 @@ async def breath(
     q_arousal = arousal if 0 <= arousal <= 1 else None
 
     try:
+        # Fetch all threshold-passing matches (uncapped); we apply max_results
+        # ourselves below so pinned buckets can be exempted from the cap.
+        # 取全部通过阈值的匹配（不设上限），下面自行截断，
+        # 这样钉选桶就能不占用 max_results 名额。
         matches = await bucket_mgr.search(
             query,
-            limit=max_results,
+            limit=9999,
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
@@ -286,8 +312,17 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
+    pinned_ids = {
+        b["id"] for b in matches
+        if b["metadata"].get("pinned") or b["metadata"].get("protected")
+    }
+    pinned_matches = [b for b in matches if b["id"] in pinned_ids]
+    other_matches = [b for b in matches if b["id"] not in pinned_ids]
+    shown = pinned_matches + other_matches[:max_results]
+    remaining = max(0, len(other_matches) - max_results)
+
     results = []
-    for bucket in matches:
+    for bucket in shown:
         try:
             summary = await dehydrator.dehydrate(bucket["content"], bucket["metadata"])
             await bucket_mgr.touch(bucket["id"])
@@ -296,9 +331,9 @@ async def breath(
             logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
             continue
 
-    # --- Random surfacing: when search returns < 3, 40% chance to float old memories ---
-    # --- 随机浮现：检索结果不足 3 条时，40% 概率从低权重旧桶里漂上来 ---
-    if len(matches) < 3 and random.random() < 0.4:
+    # --- Random surfacing: when shown results < 3, 40% chance to float old memories ---
+    # --- 随机浮现：展示结果不足 3 条时，40% 概率从低权重旧桶里漂上来 ---
+    if len(shown) < 3 and random.random() < 0.4:
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
             matched_ids = {b["id"] for b in matches}
@@ -319,6 +354,9 @@ async def breath(
 
     if not results:
         return "未找到相关记忆。"
+
+    if remaining > 0:
+        results.append(f"（还有 {remaining} 个相关桶未显示）")
 
     return "\n---\n".join(results)
 
@@ -553,8 +591,9 @@ async def trace(
 # 工具 5：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
 @mcp.tool()
-async def pulse(include_archive: bool = False) -> str:
-    """系统状态+记忆桶列表。include_archive=True含归档。"""
+async def pulse(include_archive: bool = False, show_all: bool = False) -> str:
+    """系统状态+记忆桶列表。默认只显示钉选桶+权重最高的15个非钉选桶,末尾附统计;
+    show_all=True显示全部。include_archive=True含归档。"""
     try:
         stats = await bucket_mgr.get_stats()
     except Exception as e:
@@ -578,8 +617,27 @@ async def pulse(include_archive: bool = False) -> str:
     if not buckets:
         return status + "\n记忆库为空。"
 
+    pinned = [
+        b for b in buckets
+        if b.get("metadata", {}).get("pinned") or b.get("metadata", {}).get("protected")
+    ]
+    pinned_ids = {b["id"] for b in pinned}
+    others = [b for b in buckets if b["id"] not in pinned_ids]
+    others_sorted = sorted(
+        others,
+        key=lambda b: decay_engine.calculate_score(b.get("metadata", {})),
+        reverse=True,
+    )
+
+    if show_all:
+        display = pinned + others_sorted
+        hidden_count = 0
+    else:
+        display = pinned + others_sorted[:15]
+        hidden_count = max(0, len(others_sorted) - 15)
+
     lines = []
-    for b in buckets:
+    for b in display:
         meta = b.get("metadata", {})
         if meta.get("pinned") or meta.get("protected"):
             icon = "📌"
@@ -608,7 +666,12 @@ async def pulse(include_archive: bool = False) -> str:
             f"标签:{','.join(meta.get('tags', []))}"
         )
 
-    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
+    footer = f"\n（共 {len(buckets)} 个记忆桶，显示 {len(display)} 个"
+    if hidden_count > 0:
+        footer += f"，另有 {hidden_count} 个未显示，使用 show_all=True 查看全部"
+    footer += "）"
+
+    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines) + footer
 
 
 # --- Entry point / 启动入口 ---
