@@ -102,6 +102,12 @@ def load_config(config_path: str = None) -> dict:
     if env_buckets_dir:
         config["buckets_dir"] = env_buckets_dir
 
+    env_jieba_words = os.environ.get("OMBRE_JIEBA_WORDS", "")
+    if env_jieba_words:
+        config["jieba_custom_words"] = [
+            w.strip() for w in env_jieba_words.split(",") if w.strip()
+        ]
+
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir = config["buckets_dir"]
