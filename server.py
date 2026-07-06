@@ -90,6 +90,46 @@ async def health_check(request):
 
 
 # =============================================================
+# /backup/export endpoint: full data export for scheduled backups
+# 全库数据导出接口，供定时备份任务调用
+# Requires Authorization: Bearer <OMBRE_BACKUP_TOKEN> — this dumps every
+# memory bucket (including emotion data), so it must never be open.
+# 需要 Bearer token 鉴权——会导出全部记忆（含情绪数据），绝不能公开访问
+# =============================================================
+@mcp.custom_route("/backup/export", methods=["GET"])
+async def backup_export(request):
+    from starlette.responses import JSONResponse
+    from datetime import datetime, timezone
+
+    expected_token = os.environ.get("OMBRE_BACKUP_TOKEN", "")
+    auth_header = request.headers.get("authorization", "")
+    provided_token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+
+    if not expected_token or provided_token != expected_token:
+        return JSONResponse({"status": "error", "detail": "unauthorized"}, status_code=401)
+
+    try:
+        buckets = await bucket_mgr.list_all(include_archive=True)
+        base_dir = bucket_mgr.base_dir
+        exported = [
+            {
+                "id": b["id"],
+                "metadata": b["metadata"],
+                "content": b["content"],
+                "relative_path": os.path.relpath(b["path"], base_dir),
+            }
+            for b in buckets
+        ]
+        return JSONResponse({
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "bucket_count": len(exported),
+            "buckets": exported,
+        })
+    except Exception as e:
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
