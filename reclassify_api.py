@@ -27,14 +27,21 @@ async def reclassify():
     dehydrator = Dehydrator(config)
 
     data_dir = config["buckets_dir"]
-    unclass_dir = os.path.join(data_dir, "未分类")
+    # 桶按类型分两个大目录，每个下面才是域名子目录
+    type_dirs = {
+        "permanent": os.path.join(data_dir, "permanent", "未分类"),
+        "dynamic": os.path.join(data_dir, "dynamic", "未分类"),
+    }
 
     import glob
-    files = sorted(glob.glob(os.path.join(unclass_dir, "*.md")))
-    print(f"未分类目录: {unclass_dir}")
-    print(f"找到 {len(files)} 个未分类文件\n")
+    jobs = []
+    for bucket_type, unclass_dir in type_dirs.items():
+        found = sorted(glob.glob(os.path.join(unclass_dir, "*.md")))
+        print(f"{bucket_type}/未分类: {unclass_dir} -> 找到 {len(found)} 个文件")
+        jobs.extend((bucket_type, fpath) for fpath in found)
+    print(f"\n共 {len(jobs)} 个未分类文件\n")
 
-    for fpath in files:
+    for bucket_type, fpath in jobs:
         basename = os.path.basename(fpath)
         post = frontmatter.load(fpath)
         content = post.content.strip()
@@ -54,8 +61,10 @@ async def reclassify():
 
         post.metadata["domain"] = new_domain
         post.metadata["tags"] = new_tags
-        post.metadata["valence"] = new_valence
-        post.metadata["arousal"] = new_arousal
+        # 钉选桶的 valence/arousal/importance 保持锁定，不被这次重打标覆盖
+        if not (post.metadata.get("pinned") or post.metadata.get("protected")):
+            post.metadata["valence"] = new_valence
+            post.metadata["arousal"] = new_arousal
         if new_name:
             post.metadata["name"] = new_name
 
@@ -63,9 +72,9 @@ async def reclassify():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(frontmatter.dumps(post))
 
-        # 移动到正确目录
+        # 移动到正确目录（保持原来的 permanent/dynamic 类型不变）
         primary = sanitize(new_domain[0]) if new_domain else "未分类"
-        target_dir = os.path.join(data_dir, primary)
+        target_dir = os.path.join(data_dir, bucket_type, primary)
         os.makedirs(target_dir, exist_ok=True)
 
         bid = post.metadata.get("id", "")
@@ -75,8 +84,8 @@ async def reclassify():
         if dest != fpath:
             os.rename(fpath, dest)
 
-        print(f"  OK {basename}")
-        print(f"     -> {primary}/{new_filename}")
+        print(f"  OK [{bucket_type}] {basename}")
+        print(f"     -> {bucket_type}/{primary}/{new_filename}")
         print(f"     domain={new_domain} tags={new_tags} V={new_valence} A={new_arousal}")
         print()
 
