@@ -1,45 +1,20 @@
 #!/usr/bin/env python3
 """
 用 API 重新打标未分类记忆桶，修正 domain/tags/name，移动到正确目录。
-用法: docker exec ombre-brain python3 /app/reclassify_api.py
+复用 server.py 同一套配置和 Dehydrator，保证跟实际部署配置一致。
+用法: python3 reclassify_api.py
 """
 import asyncio
 import os
-import json
-import glob
 import re
+import sys
 
-from openai import AsyncOpenAI
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import frontmatter
 
-ANALYZE_PROMPT = (
-    "你是一个内容分析器。请分析以下文本，输出结构化的元数据。\n\n"
-    "分析规则：\n"
-    '1. domain（主题域）：选最精确的 1~2 个，只选真正相关的\n'
-    '   日常: ["饮食", "穿搭", "出行", "居家", "购物"]\n'
-    '   人际: ["家庭", "恋爱", "友谊", "社交"]\n'
-    '   成长: ["工作", "学习", "考试", "求职"]\n'
-    '   身心: ["健康", "心理", "睡眠", "运动"]\n'
-    '   兴趣: ["游戏", "影视", "音乐", "阅读", "创作", "手工"]\n'
-    '   数字: ["编程", "AI", "硬件", "网络"]\n'
-    '   事务: ["财务", "计划", "待办"]\n'
-    '   内心: ["情绪", "回忆", "梦境", "自省"]\n'
-    "2. valence（情感效价）：0.0~1.0，0=极度消极 → 0.5=中性 → 1.0=极度积极\n"
-    "3. arousal（情感唤醒度）：0.0~1.0，0=非常平静 → 0.5=普通 → 1.0=非常激动\n"
-    "4. tags（关键词标签）：3~5 个最能概括内容的关键词\n"
-    "5. suggested_name（建议桶名）：10字以内的简短标题\n\n"
-    "输出格式（纯 JSON，无其他内容）：\n"
-    '{\n'
-    '  "domain": ["主题域1", "主题域2"],\n'
-    '  "valence": 0.7,\n'
-    '  "arousal": 0.4,\n'
-    '  "tags": ["标签1", "标签2", "标签3"],\n'
-    '  "suggested_name": "简短标题"\n'
-    '}'
-)
-
-DATA_DIR = "/data/dynamic"
-UNCLASS_DIR = os.path.join(DATA_DIR, "未分类")
+from utils import load_config
+from dehydrator import Dehydrator
 
 
 def sanitize(name):
@@ -48,13 +23,15 @@ def sanitize(name):
 
 
 async def reclassify():
-    client = AsyncOpenAI(
-        api_key=os.environ.get("OMBRE_API_KEY", ""),
-        base_url="https://api.siliconflow.cn/v1",
-        timeout=60.0,
-    )
+    config = load_config()
+    dehydrator = Dehydrator(config)
 
-    files = sorted(glob.glob(os.path.join(UNCLASS_DIR, "*.md")))
+    data_dir = config["buckets_dir"]
+    unclass_dir = os.path.join(data_dir, "未分类")
+
+    import glob
+    files = sorted(glob.glob(os.path.join(unclass_dir, "*.md")))
+    print(f"未分类目录: {unclass_dir}")
     print(f"找到 {len(files)} 个未分类文件\n")
 
     for fpath in files:
@@ -62,22 +39,9 @@ async def reclassify():
         post = frontmatter.load(fpath)
         content = post.content.strip()
         name = post.metadata.get("name", "")
-        full_text = f"{name}\n{content}" if name else content
 
         try:
-            resp = await client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-V3",
-                messages=[
-                    {"role": "system", "content": ANALYZE_PROMPT},
-                    {"role": "user", "content": full_text[:2000]},
-                ],
-                max_tokens=256,
-                temperature=0.1,
-            )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
-            result = json.loads(raw)
+            result = await dehydrator.analyze(content)
         except Exception as e:
             print(f"  X API失败 {basename}: {e}")
             continue
@@ -101,7 +65,7 @@ async def reclassify():
 
         # 移动到正确目录
         primary = sanitize(new_domain[0]) if new_domain else "未分类"
-        target_dir = os.path.join(DATA_DIR, primary)
+        target_dir = os.path.join(data_dir, primary)
         os.makedirs(target_dir, exist_ok=True)
 
         bid = post.metadata.get("id", "")
