@@ -260,8 +260,9 @@ async def breath(
                 logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
                 continue
 
-        # --- Unresolved buckets: surface top 2 by weight ---
-        # --- 未解决桶：按权重浮现前 2 条 ---
+        # --- Unresolved buckets: surface top N by weight ---
+        # --- 未解决桶：按权重浮现前 N 条 ---
+        SURFACE_TOP_N = 4
         unresolved = [
             b for b in all_buckets
             if not b["metadata"].get("resolved", False)
@@ -275,7 +276,8 @@ async def breath(
             key=lambda b: decay_engine.calculate_score(b["metadata"]),
             reverse=True,
         )
-        top = scored[:2]
+        top = scored[:SURFACE_TOP_N]
+        surface_remaining = max(0, len(scored) - SURFACE_TOP_N)
         dynamic_results = []
         for b in top:
             try:
@@ -289,6 +291,9 @@ async def breath(
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
+
+        if surface_remaining > 0:
+            dynamic_results.append(f"（还有 {surface_remaining} 个未解决桶未显示，可用 breath(query=...) 检索）")
 
         if not pinned_results and not dynamic_results:
             return "权重池平静，没有需要处理的记忆。"
