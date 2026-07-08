@@ -455,7 +455,7 @@ class Dehydrator:
                 {"role": "system", "content": ANALYZE_PROMPT},
                 {"role": "user", "content": content[:2000]},
             ],
-            max_tokens=256,
+            max_tokens=512,
             temperature=0.1,
         )
         if not response.choices:
