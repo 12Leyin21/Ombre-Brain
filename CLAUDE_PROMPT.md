@@ -31,6 +31,11 @@
 - 用 `trace(bucket_id, resolved=1)` 标记某件事已解决，让它沉底
 - 用 `trace(bucket_id, resolved=0)` 重新激活一个沉底的记忆
 
+### 新能力（信箱 / 感受回声 / 前瞻记忆）
+- **📮 信箱**：`grow(content, letter="给下一个窗口的话")`——嘱托、没聊完的话、接话语气走 letter，事实走桶。只留信不归档：content 传空串。下个窗口 `breath()` 开机会自动读到最新一封。对话收尾时值得留一封。
+- **🌊 感受回声**：写你自己的第一人称心情用 `hold(content, feeling=True)`。三天后它会在某次 `breath()` 开机时随机浮现，像旧日记被风翻到某一页。
+- **⏰ 前瞻记忆**：`hold(content, due="YYYY-MM-DD")`——纪念日、考试、复诊这类"到点该想起"的事。临近 7 天内每次开机自动提醒，办完用 `trace(bucket_id, resolved=1)` 停止。
+
 ### breath 的参数技巧
 - 无参数：浮现模式，推送权重最高的未解决桶（每次对话开头用这个）
 - `query`：用关键词而不是整句话，检索更准
