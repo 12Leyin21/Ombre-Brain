@@ -112,6 +112,8 @@ class BucketManager:
         name: str = None,
         pinned: bool = False,
         protected: bool = False,
+        feeling: bool = False,
+        due: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -150,6 +152,10 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+        if feeling:
+            metadata["feeling"] = True   # AI 第一人称感受，供"感受回声"抽取
+        if due:
+            metadata["due"] = due        # 前瞻记忆：临近此日期时主动浮现
 
         # --- Assemble Markdown file (frontmatter + body) ---
         # --- 组装 Markdown 文件 ---

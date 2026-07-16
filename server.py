@@ -136,6 +136,37 @@ async def backup_export(request):
 
 
 # =============================================================
+# 📮 信箱：窗口和窗口之间的接力棒
+# 事实走记忆桶，嘱托走信箱。归档(grow)时留信，开机(breath)时读信。
+# =============================================================
+def _letters_path() -> str:
+    return os.path.join(bucket_mgr.base_dir, "_letters.json")
+
+
+def _load_letters() -> list:
+    import json
+    try:
+        with open(_letters_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_letter(text: str) -> None:
+    import json
+    from datetime import datetime, timezone
+    letters = _load_letters()
+    letters.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "text": text.strip(),
+    })
+    letters = letters[-100:]   # 历史留言保留最近 100 封
+    with open(_letters_path(), "w", encoding="utf-8") as f:
+        json.dump(letters, f, ensure_ascii=False, indent=1)
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
@@ -295,14 +326,58 @@ async def breath(
         if surface_remaining > 0:
             dynamic_results.append(f"（还有 {surface_remaining} 个未解决桶未显示，可用 breath(query=...) 检索）")
 
-        if not pinned_results and not dynamic_results:
-            return "权重池平静，没有需要处理的记忆。"
+        # --- 📮 信箱：上一个窗口留下的信 ---
+        letter_part = ""
+        letters = _load_letters()
+        if letters:
+            last = letters[-1]
+            when = str(last.get("ts", ""))[:16].replace("T", " ")
+            letter_part = f"=== 📮 信箱（上个窗口 {when} UTC 留）===\n{last.get('text', '')}"
 
-        parts = []
-        if pinned_results:
-            parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
-        if dynamic_results:
-            parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
+        # --- ⏰ 前瞻记忆：临近的日子（7 天内，未解决）---
+        from datetime import date as _date
+        today = _date.today()
+        upcoming = []
+        for b in all_buckets:
+            due_raw = b["metadata"].get("due")
+            if not due_raw or b["metadata"].get("resolved", False):
+                continue
+            try:
+                days_left = (_date.fromisoformat(str(due_raw)[:10]) - today).days
+            except ValueError:
+                continue
+            if 0 <= days_left <= 7:
+                label = "就是今天！" if days_left == 0 else f"还有 {days_left} 天"
+                upcoming.append((days_left, f"⏰ {str(due_raw)[:10]}（{label}）{_bucket_summary_line(b)}"))
+        upcoming.sort(key=lambda pair: pair[0])
+        upcoming_part = ("=== ⏰ 临近的日子 ===\n" + "\n".join(line for _, line in upcoming)) if upcoming else ""
+
+        # --- 🌊 感受回声：旧日记被风翻到某一页（>3 天前的感受，随机一条）---
+        from datetime import timedelta as _timedelta
+        echo_cutoff = str(today - _timedelta(days=3))
+        echo_part = ""
+        feeling_buckets = [
+            b for b in all_buckets
+            if b["metadata"].get("feeling")
+            and str(b["metadata"].get("created", ""))[:10] < echo_cutoff
+        ]
+        if feeling_buckets:
+            pick = random.choice(feeling_buckets)
+            written = str(pick["metadata"].get("created", ""))[:10]
+            body = pick["content"].strip()
+            if len(body) > 220:
+                body = body[:220] + "…"
+            echo_part = f"=== 🌊 感受回声（{written} 写下的）===\n{body}"
+
+        parts = [p for p in (
+            letter_part,
+            ("=== 核心准则 ===\n" + "\n---\n".join(pinned_results)) if pinned_results else "",
+            upcoming_part,
+            ("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results)) if dynamic_results else "",
+            echo_part,
+        ) if p]
+        if not parts:
+            return "权重池平静，没有需要处理的记忆。"
         return "\n\n".join(parts)
 
     # --- With args: search mode / 有参数：检索模式 ---
@@ -387,13 +462,39 @@ async def hold(
     tags: str = "",
     importance: int = 5,
     pinned: bool = False,
+    feeling: bool = False,
+    due: str = "",
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。
+    feeling=True: 标记为AI第一人称感受,会在breath开机时随机回声浮现(写你自己的心情用它)。
+    due="YYYY-MM-DD": 前瞻记忆,临近该日期(7天内)会在breath开机时主动提醒,resolved后停止。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
     if not content or not content.strip():
         return "内容为空，无法存储。"
+
+    # --- 感受/前瞻桶：跳过合并直接新建，保住专属元数据 ---
+    if feeling or due:
+        try:
+            analysis = await dehydrator.analyze(content)
+        except Exception:
+            analysis = {"domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+                        "tags": [], "suggested_name": ""}
+        extra = [t.strip() for t in tags.split(",") if t.strip()]
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=list(dict.fromkeys(analysis["tags"] + extra)),
+            importance=max(1, min(10, importance)),
+            domain=analysis["domain"],
+            valence=analysis["valence"],
+            arousal=analysis["arousal"],
+            name=analysis.get("suggested_name") or None,
+            feeling=feeling,
+            due=due.strip(),
+        )
+        marks = ("🌊" if feeling else "") + (f"⏰{due.strip()}" if due.strip() else "")
+        return f"{marks}新建→{bucket_id} {','.join(analysis['domain'])}"
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -452,12 +553,21 @@ async def hold(
 # 工具 3：grow — 生长，一天的碎片长成记忆
 # =============================================================
 @mcp.tool()
-async def grow(content: str) -> str:
-    """日记归档,自动拆分为多桶。短内容(<30字)走快速路径。"""
+async def grow(content: str, letter: str = "") -> str:
+    """日记归档,自动拆分为多桶。短内容(<30字)走快速路径。
+    letter: 📮给下一个对话窗口的留言(嘱托/未聊完的话/接话语气),下个窗口breath开机时会读到。
+    事实走记忆桶,嘱托走信箱。"""
     await decay_engine.ensure_started()
 
+    # --- 📮 只留信不归档也行 ---
+    if letter and letter.strip():
+        try:
+            _save_letter(letter)
+        except Exception as e:
+            logger.warning(f"信箱写入失败: {e}")
+
     if not content or not content.strip():
-        return "内容为空，无法整理。"
+        return "📮已收信" if letter and letter.strip() else "内容为空，无法整理。"
 
     # --- Short content fast path: skip digest, use hold logic directly ---
     # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
@@ -484,7 +594,8 @@ async def grow(content: str) -> str:
             name=analysis.get("suggested_name", ""),
         )
         action = "合并" if is_merged else "新建"
-        return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}"
+        receipt = " 📮已收信" if letter and letter.strip() else ""
+        return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{receipt}"
 
     # --- Step 1: let API split and organize / 让 API 拆分整理 ---
     try:
@@ -527,7 +638,8 @@ async def grow(content: str) -> str:
             )
             results.append(f"⚠️{item.get('name', '?')}")
 
-    return f"{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+    receipt = "|📮已收信" if letter and letter.strip() else ""
+    return f"{len(items)}条|新{created}合{merged}{receipt}\n" + "\n".join(results)
 
 
 # =============================================================
