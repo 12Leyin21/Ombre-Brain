@@ -130,6 +130,7 @@ async def backup_export(request):
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "bucket_count": len(exported),
             "buckets": exported,
+            "letters": _load_letters(),
         })
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
